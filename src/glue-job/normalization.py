@@ -1,8 +1,3 @@
-# import sys
-# sys.path.insert(0, '../src')
-# import sys
-# sys.path.append('./src/utils')
-
 import awswrangler as wr
 from boto3 import Session
 import os
