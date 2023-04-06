@@ -1,0 +1,150 @@
+service: 'portal-transparencia'
+
+frameworkVersion: '3'
+
+plugins:
+  - serverless-glue
+  - serverless-prune-plugin
+  - serverless-python-requirements
+  - serverless-lift
+
+custom: 
+  pythonRequirements:
+    dockerizePip: true
+    zip: true
+
+  stage:
+    prod: "production"
+    dev: "development"
+
+  prune: 
+    automatic: true
+    number: 5  
+
+  names:
+    glue:
+      normalize: ${self:service}-${self:provider.stage}-normalizationGlueJob
+    bucket:
+      data: ${self:service}-${self:provider.stage}-data
+      code: ${self:service}-${self:provider.stage}-code
+
+  glue_args:
+    whl_wr: ${self:custom.s3_libs_path}/glue_python_sheel_sample_module-0.1-py3-none-any.whl
+    execute_libraries_upload: True
+
+  s3_libs_path: s3://${self:custom.names.bucket.code}/${self:custom.code_prefix}/glue-job/libraries
+  code_prefix: ${self:service}-${self:provider.stage}/scripts
+
+  logRetentionInDays: 14  
+  
+package:
+  exclude:
+  - node_modules/**
+  - venv/**
+  - .vscode/**
+  - .git/**
+  - README.md
+  - requirements.txt
+
+provider:
+  name: aws
+  runtime: python3.8
+
+  region: us-east-1  
+
+  stage: ${self:custom.stage.${opt:stage}, 'development'}
+
+  iam: 
+    role:
+      statements:
+        - Effect: "Allow"
+          Action:
+            - "logs:CreateLogGroup"
+            - "logs:CreateLogStream"
+            - "logs:PutLogEvents"
+            - "logs:GetMetricStream"
+
+            - "s3:ListObjectsV2"
+            - "s3:CreateBucket"
+            - "s3:ListBucket"
+            - "s3:PutObject"
+            - "s3:GetObject"
+ 
+            - "glue:StartJobRun"
+
+          Resource: "*"
+	
+functions:
+  startNormalization:
+    handler: src/functions/start_glue_job.lambda_handler
+    environment:
+      REGION_NAME: ${self:provider.region}
+      JOB_NAME: ${self:custom.names.glue.normalize}
+    events:
+      - s3:
+          bucket: ${self:custom.names.bucket.data}
+          event: s3:ObjectCreated:*
+          rules:
+            - prefix: raw_area/viagens/
+            - suffix: .csv
+          existing: false
+
+Glue:
+  bucketDeploy: ${self:custom.names.bucket.code}
+  createBucket: true
+  s3Prefix: ${self:custom.code_prefix}/glue-job/
+  tempDirBucket: ${self:custom.names.bucket.code}
+  tempDirS3Prefix: ${self:custom.code_prefix}/temp
+
+  jobs:  
+    - name: ${self:custom.names.glue.normalize}
+      scriptPath: ./src/glue-job/normalization.py
+      tempDir: true
+      type: pythonshell
+      glueVersion: python3-1.0
+      role: { Fn::GetAtt: [ GlueRoleNormalize, Arn ] }
+      MaxConcurrentRuns: 1
+      MaxRetries: 0
+      Timeout: 45
+      DefaultArguments:
+        extraPyFiles: ${self:custom.glue_args.whl_wr}
+        customArguments:
+          region_name: ${self:provider.region}
+          bucket_name: ${self:custom.names.bucket.data}
+      SupportFiles:
+        - local_path: ./dist
+          s3_bucket: ${self:custom.names.bucket.code}
+          s3_prefix: ${self:custom.code_prefix}/glue-job/libraries/
+          execute_upload: ${self:custom.glue_args.execute_libraries_upload}
+  
+resources:
+  Resources:     
+    GlueRoleNormalize:      
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: ${self:service}-${self:provider.stage}-GlueRoleNormalize
+        AssumeRolePolicyDocument:
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service:
+                  - glue.amazonaws.com
+              Action:
+                - sts:AssumeRole
+        Path: "/"
+        ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+        Policies:
+          - PolicyName: ${self:service}-${self:provider.stage}-GluePolicyTree
+            PolicyDocument:
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - logs:CreateLogStream
+                    - logs:CreateLogGroup
+                    - logs:PutLogEvents
+                    - s3:PutObject
+                    - s3:GetObject
+                  Resource: 
+                    - "*"
+    
